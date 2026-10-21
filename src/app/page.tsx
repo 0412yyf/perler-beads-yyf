@@ -91,18 +91,18 @@ import FloatingToolbar from '../components/FloatingToolbar';
 import MagnifierTool from '../components/MagnifierTool';
 import MagnifierSelectionOverlay from '../components/MagnifierSelectionOverlay';
 import { loadPaletteSelections, savePaletteSelections, presetToSelections, PaletteSelections } from '../utils/localStorageUtils';
+import { BRAND_NAME } from '../utils/brandConfig';
 import { TRANSPARENT_KEY, transparentColorData } from '../utils/pixelEditingUtils';
 
-// 1. 导入新的 DonationModal 组件
-import DonationModal from '../components/DonationModal';
 import FocusModePreDownloadModal from '../components/FocusModePreDownloadModal';
+import CropModal from '../components/CropModal';
 
 export default function Home() {
   const [originalImageSrc, setOriginalImageSrc] = useState<string | null>(null);
   const [granularity, setGranularity] = useState<number>(50);
   const [granularityInput, setGranularityInput] = useState<string>("50");
-  const [similarityThreshold, setSimilarityThreshold] = useState<number>(30);
-  const [similarityThresholdInput, setSimilarityThresholdInput] = useState<string>("30");
+  const [similarityThreshold, setSimilarityThreshold] = useState<number>(10);
+  const [similarityThresholdInput, setSimilarityThresholdInput] = useState<string>("10");
   // 添加像素化模式状态
   const [pixelationMode, setPixelationMode] = useState<PixelationMode>(PixelationMode.Dominant); // 默认为卡通模式
   
@@ -128,7 +128,6 @@ export default function Home() {
   // 新增：一键擦除模式状态
   const [isEraseMode, setIsEraseMode] = useState<boolean>(false);
   // 新增状态变量：控制打赏弹窗
-  const [isDonationModalOpen, setIsDonationModalOpen] = useState<boolean>(false);
   const [customPaletteSelections, setCustomPaletteSelections] = useState<PaletteSelections>({});
   const [isCustomPaletteEditorOpen, setIsCustomPaletteEditorOpen] = useState<boolean>(false);
   const [isCustomPalette, setIsCustomPalette] = useState<boolean>(false);
@@ -182,19 +181,28 @@ export default function Home() {
   // 新增：专心拼豆模式进入前下载提醒弹窗
   const [isFocusModePreDownloadModalOpen, setIsFocusModePreDownloadModalOpen] = useState<boolean>(false);
 
-  // 新增：横屏设备弹窗状态
-  const [showDesktopModal, setShowDesktopModal] = useState<boolean>(false);
 
   // 新增：编辑撤回历史栈（多步）
   interface EditSnapshot {
     mappedPixelData: MappedPixel[][];
     colorCounts: { [key: string]: { count: number; color: string } };
     totalBeadCount: number;
+    gridDimensions?: { N: number; M: number };
   }
   const [editHistory, setEditHistory] = useState<EditSnapshot[]>([]);
 
   // 新增：一键去背景撤回快照（单步）
   const [bgRemovalSnapshot, setBgRemovalSnapshot] = useState<EditSnapshot | null>(null);
+
+  // 画布尺寸调整（对齐作者 2.0 的「画布尺寸」功能）
+  const [isCanvasResizeOpen, setIsCanvasResizeOpen] = useState<boolean>(false);
+  const [resizeWidthInput, setResizeWidthInput] = useState<string>('');
+  const [resizeHeightInput, setResizeHeightInput] = useState<string>('');
+  // 内容锚点：x: 0左 1中 2右；y: 0上 1中 2下
+  const [resizeAnchor, setResizeAnchor] = useState<{ x: number; y: number }>({ x: 1, y: 1 });
+
+  // 图片裁剪：isNewUpload=true 表示上传后首次裁剪；false 表示编辑中重新裁剪
+  const [cropState, setCropState] = useState<{ src: string; isNewUpload: boolean } | null>(null);
 
   // 新增：轻量提示
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -232,9 +240,10 @@ export default function Home() {
       mappedPixelData: mappedPixelData.map(row => row.map(cell => ({ ...cell }))),
       colorCounts: { ...colorCounts },
       totalBeadCount,
+      gridDimensions: gridDimensions ?? undefined,
     };
     setEditHistory(prev => [...prev.slice(-49), snapshot]);
-  }, [mappedPixelData, colorCounts, totalBeadCount]);
+  }, [mappedPixelData, colorCounts, totalBeadCount, gridDimensions]);
 
   // 编辑模式多步撤回
   const handleUndoEdit = useCallback(() => {
@@ -243,6 +252,9 @@ export default function Home() {
     setMappedPixelData(snapshot.mappedPixelData);
     setColorCounts(snapshot.colorCounts);
     setTotalBeadCount(snapshot.totalBeadCount);
+    if (snapshot.gridDimensions) {
+      setGridDimensions(snapshot.gridDimensions);
+    }
     setEditHistory(prev => prev.slice(0, -1));
     showToast('已撤回上一步');
   }, [editHistory, showToast]);
@@ -261,6 +273,70 @@ export default function Home() {
   const clearEditHistory = useCallback(() => {
     setEditHistory([]);
   }, []);
+
+  // --- 画布尺寸调整 ---
+
+  const openCanvasResize = useCallback(() => {
+    if (!gridDimensions) return;
+    setResizeWidthInput(String(gridDimensions.N));
+    setResizeHeightInput(String(gridDimensions.M));
+    setResizeAnchor({ x: 1, y: 1 });
+    setIsCanvasResizeOpen(true);
+  }, [gridDimensions]);
+
+  // 根据锚点重建网格：原内容停靠在锚点侧，新增区域填透明（白色），缩小则从另一侧裁掉
+  const applyCanvasResize = useCallback(() => {
+    if (!mappedPixelData || !gridDimensions) return;
+    const newN = parseInt(resizeWidthInput, 10);
+    const newM = parseInt(resizeHeightInput, 10);
+    if (!Number.isFinite(newN) || !Number.isFinite(newM) || newN < 1 || newM < 1 || newN > 300 || newM > 300) {
+      showToast('宽高需为 1-300 之间的整数');
+      return;
+    }
+    const { N, M } = gridDimensions;
+    if (newN === N && newM === M) {
+      setIsCanvasResizeOpen(false);
+      return;
+    }
+    saveEditSnapshot();
+
+    const dx = newN - N;
+    const dy = newM - M;
+    const offsetX = resizeAnchor.x === 0 ? 0 : resizeAnchor.x === 1 ? Math.floor(dx / 2) : dx;
+    const offsetY = resizeAnchor.y === 0 ? 0 : resizeAnchor.y === 1 ? Math.floor(dy / 2) : dy;
+
+    const newGrid: MappedPixel[][] = Array.from({ length: newM }, (_, row) =>
+      Array.from({ length: newN }, (_, col) => {
+        const srcRow = row - offsetY;
+        const srcCol = col - offsetX;
+        if (srcRow >= 0 && srcRow < M && srcCol >= 0 && srcCol < N) {
+          return { ...mappedPixelData[srcRow][srcCol] };
+        }
+        return { ...transparentColorData };
+      })
+    );
+
+    // 重新统计颜色用量
+    const newColorCounts: { [key: string]: { count: number; color: string } } = {};
+    for (const row of newGrid) {
+      for (const cell of row) {
+        if (cell && cell.key && !cell.isExternal && cell.key !== TRANSPARENT_KEY) {
+          if (!newColorCounts[cell.key]) {
+            newColorCounts[cell.key] = { count: 0, color: cell.color };
+          }
+          newColorCounts[cell.key].count++;
+        }
+      }
+    }
+    const newTotal = Object.values(newColorCounts).reduce((sum, item) => sum + item.count, 0);
+
+    setMappedPixelData(newGrid);
+    setGridDimensions({ N: newN, M: newM });
+    setColorCounts(newColorCounts);
+    setTotalBeadCount(newTotal);
+    setIsCanvasResizeOpen(false);
+    showToast(`画布已调整为 ${newN}×${newM}`);
+  }, [mappedPixelData, gridDimensions, resizeWidthInput, resizeHeightInput, resizeAnchor, saveEditSnapshot, showToast]);
 
   // 放大镜像素编辑处理函数
   const handleMagnifierPixelEdit = (row: number, col: number, colorData: { key: string; color: string }) => {
@@ -601,6 +677,79 @@ export default function Home() {
     return canvas.toDataURL('image/png');
   };
 
+// === 外部化的图片加载逻辑 ===
+
+  // 图片类型检测：唯一色数 > 10000 判定为照片，自动切换为"真实模式"（平均色）
+  const detectImageTypeAndSetMode = useCallback((dataUrl: string) => {
+    const probeImg = new window.Image();
+    probeImg.onload = () => {
+      try {
+        const MAX_DIM = 256; // 缩小采样提速
+        const scale = Math.min(1, MAX_DIM / Math.max(probeImg.width, probeImg.height));
+        const w = Math.max(1, Math.round(probeImg.width * scale));
+        const h = Math.max(1, Math.round(probeImg.height * scale));
+        const probeCanvas = document.createElement('canvas');
+        probeCanvas.width = w; probeCanvas.height = h;
+        const pctx = probeCanvas.getContext('2d', { willReadFrequently: true });
+        if (!pctx) return;
+        pctx.fillStyle = '#FFFFFF'; // 与主流程一致的白底合成
+        pctx.fillRect(0, 0, w, h);
+        pctx.drawImage(probeImg, 0, 0, w, h);
+        const data = pctx.getImageData(0, 0, w, h).data;
+        const unique = new Set<number>();
+        for (let i = 0; i < data.length; i += 4) {
+          unique.add((data[i] << 16) | (data[i + 1] << 8) | data[i + 2]);
+        }
+        console.log(`[类型检测] 唯一色数: ${unique.size} → ${unique.size > 10000 ? '照片 → 真实模式' : '卡通 → 保持当前模式'}`);
+        if (unique.size > 10000) {
+          setPixelationMode(PixelationMode.Average);
+        }
+      } catch (e) {
+        console.warn('图片类型检测失败，保持当前模式', e);
+      }
+    };
+    probeImg.src = dataUrl;
+  }, []);
+
+  // 应用最终图片（可能是裁剪后的）：重置状态并触发像素化
+  const finalizeImageLoad = useCallback((result: string) => {
+    setOriginalImageSrc(result);
+    setMappedPixelData(null);
+    setGridDimensions(null);
+    setColorCounts(null);
+    setTotalBeadCount(0);
+    setInitialGridColorKeys(new Set()); // ++ 重置初始键 ++
+    // ++ 重置横轴格子数量为默认值 ++
+    const defaultGranularity = 100;
+    setGranularity(defaultGranularity);
+    setGranularityInput(defaultGranularity.toString());
+    setRemapTrigger(prev => prev + 1); // Trigger full remap for new image
+    setIsManualColoringMode(false);
+    setSelectedColor(null);
+    setIsEraseMode(false);
+    detectImageTypeAndSetMode(result); // 自动检测照片/卡通并切换像素化模式
+  }, [detectImageTypeAndSetMode]);
+
+  // --- 图片裁剪 ---
+  const handleCropConfirm = useCallback((croppedSrc: string) => {
+    setCropState(null);
+    finalizeImageLoad(croppedSrc);
+  }, [finalizeImageLoad]);
+
+  // 「使用整图」：仅新上传时需要落地；编辑中重新裁剪点跳过则维持原状
+  const handleCropSkip = useCallback(() => {
+    if (!cropState) return;
+    const { src, isNewUpload } = cropState;
+    setCropState(null);
+    if (isNewUpload) {
+      finalizeImageLoad(src);
+    }
+  }, [cropState, finalizeImageLoad]);
+
+  const handleCropCancel = useCallback(() => {
+    setCropState(null);
+  }, []);
+
   const processFile = (file: File) => {
     // 检查文件类型
     const fileExtension = file.name.split('.').pop()?.toLowerCase();
@@ -663,19 +812,9 @@ export default function Home() {
           alert(`CSV导入失败：${error.message}`);
         });
     } else {
-      // 处理图片文件
+      // 处理图片文件：读取完成后先进入裁剪画面，确认（或使用整图）后再触发像素化
       const applyImageSrc = (result: string) => {
-        setOriginalImageSrc(result);
-        setMappedPixelData(null);
-        setGridDimensions(null);
-        setColorCounts(null);
-        setTotalBeadCount(0);
-        setInitialGridColorKeys(new Set()); // ++ 重置初始键 ++
-        // ++ 重置横轴格子数量为默认值 ++
-        const defaultGranularity = 100;
-        setGranularity(defaultGranularity);
-        setGranularityInput(defaultGranularity.toString());
-        setRemapTrigger(prev => prev + 1); // Trigger full remap for new image
+        setCropState({ src: result, isNewUpload: true });
       };
 
       const isGif = file.type === 'image/gif' || file.name.toLowerCase().endsWith('.gif');
@@ -895,6 +1034,9 @@ export default function Home() {
       pixelatedCanvas.width = outputWidth; pixelatedCanvas.height = outputHeight;
       console.log(`Canvas dimensions: Original ${img.width}x${img.height}, Output ${outputWidth}x${outputHeight}`);
 
+      // 先铺白色底，消除图片 alpha 通道导致的透明像素缺失（大片白色空白 Bug）
+      originalCtx.fillStyle = '#FFFFFF';
+      originalCtx.fillRect(0, 0, img.width, img.height);
       originalCtx.drawImage(img, 0, 0, img.width, img.height);
       console.log("Original image drawn.");
 
@@ -1105,55 +1247,7 @@ export default function Home() {
     setIsMounted(true);
   }, []);
 
-  // 强制显示专业工作台弹窗（每次进入页面都弹，引导用户前往新版）
-  useEffect(() => {
-    setShowDesktopModal(true);
-  }, []);
 
-  // 添加URL重定向检查
-  useEffect(() => {
-    // 检查是否在浏览器环境中
-    if (typeof window !== 'undefined') {
-      const currentUrl = window.location.href;
-      const currentHostname = window.location.hostname;
-      const targetDomain = 'https://perlerbeadsold.zippland.com/';
-      
-      // 排除localhost和127.0.0.1等本地开发环境
-      const isLocalhost = currentHostname === 'localhost' || 
-                         currentHostname === '127.0.0.1' || 
-                         currentHostname.startsWith('192.168.') ||
-                         currentHostname.startsWith('10.') ||
-                         currentHostname.endsWith('.local');
-      
-      // 检查当前URL是否不是目标域名，且不是本地开发环境
-      if (!currentUrl.startsWith(targetDomain) && !isLocalhost) {
-        console.log(`当前URL: ${currentUrl}`);
-        console.log(`目标URL: ${targetDomain}`);
-        console.log('正在重定向到官方域名...');
-        
-        // 保留当前路径和查询参数
-        const currentPath = window.location.pathname;
-        const currentSearch = window.location.search;
-        const currentHash = window.location.hash;
-        
-        // 构建完整的目标URL
-        let redirectUrl = targetDomain;
-        
-        // 如果不是根路径，添加路径
-        if (currentPath && currentPath !== '/') {
-          redirectUrl = redirectUrl.replace(/\/$/, '') + currentPath;
-        }
-        
-        // 添加查询参数和哈希
-        redirectUrl += currentSearch + currentHash;
-        
-        // 执行重定向
-        window.location.replace(redirectUrl);
-      } else if (isLocalhost) {
-        console.log(`检测到本地开发环境 (${currentHostname})，跳过重定向`);
-      }
-    }
-  }, []); // 只在组件首次挂载时执行
 
     // --- Download function (ensure filename includes palette) ---
     const handleDownloadRequest = (options?: GridDownloadOptions) => {
@@ -2079,10 +2173,10 @@ export default function Home() {
 
             {/* Ultra fancy brand name and tool name with hyper cute decorations */}
             <div className="relative flex flex-col items-center space-y-3">
-              {/* Brand name - 七卡瓦 with ultra fancy effects */}
+              {/* Brand name with ultra fancy effects */}
               <div className="relative">
                 <h1 className="relative text-4xl sm:text-6xl font-black text-transparent bg-clip-text bg-gradient-to-r from-pink-500 via-purple-500 via-blue-500 to-cyan-400 tracking-wider drop-shadow-2xl transform hover:scale-105 transition-transform duration-300">
-                  七卡瓦
+                  {BRAND_NAME}
                 </h1>
                 
                 {/* Super fancy geometric decorations */}
@@ -2158,76 +2252,8 @@ export default function Home() {
             让像素创意属于每一个人
           </p>
 
-          {/* 横屏设备弹窗 */}
-          {showDesktopModal && (
-            <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={() => setShowDesktopModal(false)}>
-              <div className="relative mx-4 w-full max-w-md rounded-2xl border border-blue-200 dark:border-blue-700 bg-white dark:bg-gray-800 p-6 shadow-2xl" onClick={e => e.stopPropagation()}>
-                <button
-                  onClick={() => setShowDesktopModal(false)}
-                  className="absolute top-3 right-3 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 transition-colors"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5">
-                    <path d="M6.28 5.22a.75.75 0 00-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 101.06 1.06L10 11.06l3.72 3.72a.75.75 0 101.06-1.06L11.06 10l3.72-3.72a.75.75 0 00-1.06-1.06L10 8.94 6.28 5.22z" />
-                  </svg>
-                </button>
-                <div className="flex flex-col items-center text-center">
-                  <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-blue-100 dark:bg-blue-900/40">
-                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-6 h-6 text-blue-500 dark:text-blue-300">
-                      <path fillRule="evenodd" d="M3 4a1 1 0 011-1h12a1 1 0 011 1v8a1 1 0 01-1 1H4a1 1 0 01-1-1V4zm1 0v8h12V4H4zm-1 12a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" clipRule="evenodd" />
-                    </svg>
-                  </div>
-                  <h3 className="text-lg font-semibold text-gray-900 dark:text-white">专业工作台已上线</h3>
-                  <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">专业工作台拥有更完整的功能和更好的操作体验，推荐前往使用。</p>
-                  <div className="mt-5 flex w-full gap-3">
-                    <button
-                      onClick={() => setShowDesktopModal(false)}
-                      className="flex-1 rounded-xl border border-gray-300 dark:border-gray-600 px-4 py-2.5 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
-                    >
-                      留在此页
-                    </button>
-                    <a
-                      href="https://perlerbeads.zippland.com/"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-blue-700 transition-colors"
-                    >
-                      前往专业工作台
-                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
-                        <path fillRule="evenodd" d="M3 10a1 1 0 011-1h9.586L11.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414-1.414L13.586 11H4a1 1 0 01-1-1z" clipRule="evenodd" />
-                      </svg>
-                    </a>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
 
-          {/* 链接行：专业工作台· 小红书 · GitHub */}
-          <div className="mt-4 flex flex-wrap items-center justify-center gap-2.5 text-xs">
-            <a href="https://perlerbeads.zippland.com/" target="_blank" rel="noopener noreferrer" className="group inline-flex items-center gap-1 text-indigo-600 dark:text-indigo-400 hover:text-indigo-800 dark:hover:text-indigo-300 font-medium transition-colors">
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5">
-                <path fillRule="evenodd" d="M3 4a1 1 0 011-1h12a1 1 0 011 1v8a1 1 0 01-1 1H4a1 1 0 01-1-1V4zm1 0v8h12V4H4zm-1 12a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" clipRule="evenodd" />
-              </svg>
-              专业工作台
-              <span className="px-1 py-px rounded bg-indigo-500 text-[9px] font-bold text-white leading-none">NEW</span>
-            </a>
-            <span className="text-gray-300 dark:text-gray-600">·</span>
-            <a href="https://www.xiaohongshu.com/user/profile/623e8b080000000010007721" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-rose-500 dark:text-rose-400 hover:text-rose-700 dark:hover:text-rose-300 font-medium transition-colors">
-              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 1024 1024" fill="currentColor">
-                <path d="M512 64C264.6 64 64 264.6 64 512s200.6 448 448 448 448-200.6 448-448S759.4 64 512 64z m238.8 360.2l-57.7 93.3c-10.1 16.3-31.5 21.3-47.8 11.2l-112.4-69.5c-16.3-10.1-21.3-31.5-11.2-47.8l57.7-93.3c10.1-16.3 31.5-21.3 47.8-11.2l112.4 69.5c16.3 10.1 21.3 31.5 11.2 47.8zM448 496l-57.7 93.3c-10.1 16.3-31.5 21.3-47.8 11.2l-112.4-69.5c-16.3-10.1-21.3-31.5-11.2-47.8l57.7-93.3c10.1-16.3 31.5-21.3 47.8-11.2l112.4 69.5c16.3 10.1 21.3 31.5 11.2 47.8z m248.9 43.2l-57.7 93.3c-10.1 16.3-31.5 21.3-47.8 11.2l-112.4-69.5c-16.3-10.1-21.3-31.5-11.2-47.8l57.7-93.3c10.1-16.3 31.5-21.3 47.8-11.2l112.4 69.5c16.3 10.1 21.3 31.5 11.2 47.8z"/>
-              </svg>
-              小红书
-            </a>
-            <span className="text-gray-300 dark:text-gray-600">·</span>
-            <a href="https://github.com/Zippland/perler-beads" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 font-medium transition-colors">
-              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
-                <path fillRule="evenodd" d="M12 0C5.37 0 0 5.48 0 12.25c0 5.42 3.44 10.01 8.2 11.63.6.12.82-.27.82-.6 0-.3-.01-1.08-.02-2.13-3.34.74-4.04-1.65-4.04-1.65-.55-1.44-1.35-1.83-1.35-1.83-1.1-.78.08-.77.08-.77 1.21.09 1.85 1.26 1.85 1.26 1.08 1.9 2.83 1.35 3.52 1.03.11-.81.42-1.35.77-1.66-2.66-.31-5.46-1.36-5.46-6.06 0-1.34.46-2.43 1.22-3.29-.12-.31-.53-1.55.12-3.23 0 0 1-.33 3.29 1.25a10.96 10.96 0 0 1 5.98 0c2.29-1.58 3.29-1.25 3.29-1.25.65 1.68.24 2.92.12 3.23.76.86 1.22 1.95 1.22 3.29 0 4.71-2.81 5.74-5.49 6.05.43.38.81 1.13.81 2.28 0 1.65-.02 2.98-.02 3.39 0 .33.22.72.83.59C20.56 22.25 24 17.67 24 12.25 24 5.48 18.63 0 12 0Z" />
-              </svg>
-              GitHub
-            </a>
-          </div>
-          {/* 来源提示 */}
-          <p className="mt-2 text-[10px] text-gray-400 dark:text-gray-500">发布平台请标注来源或保留图片水印及标识</p>
+
         </div>
       </header>
 
@@ -2335,6 +2361,20 @@ export default function Home() {
                   >
                     回撤上一步
                   </button>
+                  <button
+                    onClick={() => originalImageSrc && setCropState({ src: originalImageSrc, isNewUpload: false })}
+                    disabled={!originalImageSrc}
+                    className="inline-flex items-center justify-center h-9 px-3 text-sm rounded-md border border-amber-200 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-200 hover:bg-amber-100 dark:hover:bg-amber-800/40 transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+                  >
+                    裁剪图片
+                  </button>
+                  <button
+                    onClick={openCanvasResize}
+                    disabled={!mappedPixelData || !gridDimensions}
+                    className="inline-flex items-center justify-center h-9 px-3 text-sm rounded-md border border-purple-200 dark:border-purple-700 bg-purple-50 dark:bg-purple-900/30 text-purple-700 dark:text-purple-200 hover:bg-purple-100 dark:hover:bg-purple-800/40 transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+                  >
+                    画布尺寸
+                  </button>
                 </div>
 
                 {/* Pixelation Mode Selector */}
@@ -2353,6 +2393,7 @@ export default function Home() {
                       <option value={PixelationMode.Average} className="bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-200">真实 (平均)</option>
                     </select>
                   </div>
+                    <p className="mt-1 text-[11px] leading-snug text-gray-500 dark:text-gray-400">照片建议用「真实」，卡通/像素图建议用「卡通」；上传照片时会自动切换。</p>
                 </div>
 
                 {/* 色号系统选择器 */}
@@ -2421,6 +2462,98 @@ export default function Home() {
               </div>
             )}
 
+            {/* 画布尺寸调整弹窗 */}
+            {isCanvasResizeOpen && gridDimensions && (
+              <div className="fixed inset-0 bg-black bg-opacity-50 backdrop-blur-sm z-50 flex justify-center items-center p-4" onClick={() => setIsCanvasResizeOpen(false)}>
+                <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl w-full max-w-sm p-5" onClick={(e) => e.stopPropagation()}>
+                  <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-1">画布尺寸</h3>
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mb-4">
+                    当前 {gridDimensions.N}&times;{gridDimensions.M} 格。调整会保留已绘内容；如需撤销，请进入手动编辑模式点击撤回按钮。
+                  </p>
+
+                  {/* 扩大 / 缩小 指示 */}
+                  {(() => {
+                    const nn = parseInt(resizeWidthInput, 10);
+                    const nm = parseInt(resizeHeightInput, 10);
+                    const expand = (Number.isFinite(nn) && nn > gridDimensions.N) || (Number.isFinite(nm) && nm > gridDimensions.M);
+                    const shrink = (Number.isFinite(nn) && nn < gridDimensions.N) || (Number.isFinite(nm) && nm < gridDimensions.M);
+                    const label = expand && !shrink ? '扩大' : shrink && !expand ? '缩小' : null;
+                    return label ? (
+                      <div className="flex justify-center mb-4">
+                        <span className="px-3 py-1 text-xs rounded-full bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-200">{label}</span>
+                      </div>
+                    ) : null;
+                  })()}
+
+                  <div className="space-y-3 mb-4">
+                    <div>
+                      <label className="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">宽度（列）</label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={300}
+                        value={resizeWidthInput}
+                        onChange={(e) => setResizeWidthInput(e.target.value)}
+                        className="w-full p-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-200 focus:ring-blue-500 focus:border-blue-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">高度（行）</label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={300}
+                        value={resizeHeightInput}
+                        onChange={(e) => setResizeHeightInput(e.target.value)}
+                        className="w-full p-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-200 focus:ring-blue-500 focus:border-blue-500"
+                      />
+                    </div>
+                  </div>
+
+                  {/* 内容锚点 */}
+                  <div className="mb-5">
+                    <label className="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">内容锚点</label>
+                    <p className="text-[11px] text-gray-500 dark:text-gray-400 mb-2">原内容停靠位置；新增空间补在另一侧。</p>
+                    <div className="flex justify-center">
+                      <div className="grid grid-cols-3 gap-1.5">
+                        {[0, 1, 2].map((y) =>
+                          [0, 1, 2].map((x) => (
+                            <button
+                              key={x + '-' + y}
+                              onClick={() => setResizeAnchor({ x: x, y: y })}
+                              aria-label={'锚点 行' + (y + 1) + ' 列' + (x + 1)}
+                              className={'w-9 h-9 rounded-full flex items-center justify-center transition-all duration-150 ' +
+                                (resizeAnchor.x === x && resizeAnchor.y === y
+                                  ? 'bg-blue-500 shadow-md scale-110'
+                                  : 'bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600')}
+                            >
+                              <span className={'w-1.5 h-1.5 rounded-full ' + (resizeAnchor.x === x && resizeAnchor.y === y ? 'bg-white' : 'bg-gray-400 dark:bg-gray-500')}></span>
+                            </button>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setIsCanvasResizeOpen(false)}
+                      className="flex-1 h-10 rounded-md border border-gray-300 dark:border-gray-600 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+                    >
+                      取消
+                    </button>
+                    <button
+                      onClick={applyCanvasResize}
+                      className="flex-1 h-10 rounded-md bg-blue-500 hover:bg-blue-600 text-white text-sm transition-colors shadow-sm"
+                    >
+                      应用
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+
             {/* Output Section */}
             <div className="w-full md:max-w-2xl">
               <canvas ref={originalCanvasRef} className="hidden"></canvas>
@@ -2480,6 +2613,16 @@ export default function Home() {
             </div>
           </div> // This closes the main div started after originalImageSrc check
         )}
+
+            {/* 图片裁剪弹窗（置于条件块外：首传裁剪时 originalImageSrc 尚为 null） */}
+            {cropState && (
+              <CropModal
+                src={cropState.src}
+                onConfirm={handleCropConfirm}
+                onSkip={handleCropSkip}
+                onCancel={handleCropCancel}
+              />
+            )}
 
         {/* ++ HIDE Color Counts in manual mode ++ */}
         {!isManualColoringMode && originalImageSrc && colorCounts && Object.keys(colorCounts).length > 0 && (
@@ -2767,31 +2910,12 @@ export default function Home() {
       {/* Apply dark mode styles to the Footer */}
       <footer className="w-full md:max-w-4xl mt-10 mb-6 py-6 text-center text-xs sm:text-sm text-gray-500 dark:text-gray-400 border-t border-gray-200 dark:border-gray-700 bg-gradient-to-b from-white to-gray-50 dark:from-gray-900 dark:to-gray-800/50 rounded-lg shadow-inner">
 
-        {/* Donation button styles are likely fine */}
-        <button
-          onClick={() => setIsDonationModalOpen(true)}
-          className="mb-5 px-6 py-2.5 bg-gradient-to-r from-pink-500 to-rose-500 text-white rounded-full shadow-lg transition-all duration-300 hover:shadow-xl hover:translate-y-[-2px] flex items-center justify-center mx-auto"
-        >
-          {/* SVG and Text inside button */}
-          <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M18 8h1a2 2 0 0 1 2 2v1c0 1.1-.9 2-2 2h-1" fill="#f9a8d4" />
-            <path d="M6 8h12v9a3 3 0 0 1-3 3H9a3 3 0 0 1-3-3V8z" fill="#f9a8d4" />
-            <path d="M6 8V7a3 3 0 0 1 3-3h6a3 3 0 0 1 3 3v1" fill="#f472b6" />
-            <path d="M12 16v-4" stroke="#7d2a5a" />
-            <path d="M9.5 14.5L9 16" stroke="#7d2a5a" />
-            <path d="M14.5 14.5L15 16" stroke="#7d2a5a" />
-          </svg>
-          <span>请作者喝一杯奶茶</span>
-        </button>
-
         {/* Copyright text color */}
         <p className="font-medium text-gray-600 dark:text-gray-300">
-          七卡瓦 拼豆底稿生成器 &copy; {new Date().getFullYear()}
+          {BRAND_NAME} 拼豆底稿生成器 &copy; {new Date().getFullYear()}
         </p>
       </footer>
 
-      {/* Donation Modal - 现在使用新的组件 */}
-      <DonationModal isOpen={isDonationModalOpen} onClose={() => setIsDonationModalOpen(false)} />
 
       {/* 使用导入的下载设置弹窗组件 */}
       <DownloadSettingsModal 

@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { Analytics } from "@vercel/analytics/next";
+import { BRAND_PAGE_TITLE } from "../utils/brandConfig";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -14,7 +15,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "七卡瓦拼豆底稿生成器 | Perler Beads Generator",
+  title: BRAND_PAGE_TITLE,
   description: "上传图片，调整精细度，一键生成像素画图纸，简单实用的像素画生成工具",
   manifest: "/manifest.json",
   appleWebApp: {

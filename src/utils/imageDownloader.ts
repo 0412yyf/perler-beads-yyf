@@ -1,3 +1,4 @@
+import { BRAND_TITLE, BRAND_WATERMARK, BRAND_SOURCE_TEXT, BRAND_QRCODE_PATH } from './brandConfig';
 import { GridDownloadOptions } from '../types/downloadTypes';
 import { MappedPixel, PaletteColor } from './pixelation';
 import { getDisplayColorKey, getColorKeyByHex, ColorSystem } from './colorSystemUtils';
@@ -231,7 +232,9 @@ export async function downloadImage({
   
   // 加载二维码图片
   const qrCodeImage = new Image();
-  qrCodeImage.src = '/website_qrcode.png'; // 使用public目录中的图片
+  if (BRAND_QRCODE_PATH) {
+    qrCodeImage.src = BRAND_QRCODE_PATH; // 品牌二维码路径见 src/utils/brandConfig.ts
+  }
   
   // 主要下载处理函数
   const processDownload = () => {
@@ -398,7 +401,7 @@ export async function downloadImage({
     const titleStartX = brandBlockWidth + titleBarHeight * 0.3;
     const mainTitleY = titleBarHeight * 0.4;
     
-    ctx.fillText('七卡瓦', titleStartX, mainTitleY);
+    ctx.fillText(BRAND_TITLE, titleStartX, mainTitleY);
     
     // 5. 副标题 - 功能说明
     ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
@@ -422,6 +425,7 @@ export async function downloadImage({
     const qrX = downloadWidth - qrSize - titleBarHeight * 0.15;
     const qrY = (titleBarHeight - qrSize) / 2;
     
+    if (BRAND_QRCODE_PATH) {
     // 二维码背景 - 圆角，更现代
     ctx.fillStyle = '#FFFFFF';
     ctx.beginPath();
@@ -445,6 +449,7 @@ export async function downloadImage({
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText('扫码访问', qrX + qrSize / 2, qrY + qrSize / 2);
+    }
     }
   
     console.log(`Generating download grid image: ${downloadWidth}x${downloadHeight}`);
@@ -621,7 +626,7 @@ export async function downloadImage({
 
     // 副水印：放在网格左上角，简洁版本
     const secondaryWatermarkFontSize = Math.max(10, Math.floor(downloadCellSize * 0.5));
-    const secondaryText = '@七卡瓦';
+  const secondaryText = BRAND_WATERMARK;
     
     ctx.font = `500 ${secondaryWatermarkFontSize}px system-ui, -apple-system, sans-serif`;
     const secondaryMetrics = ctx.measureText(secondaryText);
@@ -747,7 +752,7 @@ export async function downloadImage({
       
       // 统计区域水印 - 第三重保护，清晰明显
       const statsWatermarkFontSize = Math.max(10, Math.floor(statsFontSize * 0.7));
-      const statsWatermarkText = '图纸来源：小红书@七卡瓦';
+      const statsWatermarkText = BRAND_SOURCE_TEXT;
       
       ctx.font = `500 ${statsWatermarkFontSize}px system-ui, -apple-system, sans-serif`;
       const statsTextMetrics = ctx.measureText(statsWatermarkText);
@@ -840,7 +845,7 @@ export async function downloadImage({
   };
   
   // 图片加载后处理，或在加载失败时使用占位符
-  if (qrCodeImage.complete) {
+  if (!BRAND_QRCODE_PATH || qrCodeImage.complete) {
     processDownload();
   } else {
     qrCodeImage.onload = processDownload;
